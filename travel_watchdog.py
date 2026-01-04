@@ -10,8 +10,8 @@ What it does:
 4) Speed test: every 30 mins between 08:00-20:00 (local time), tries tools in order "best"->"worst":
       a) librespeed-cli  (JSON)
       b) Ookla speedtest (speedtest -f json) if available
-      c) speedtest-cli   (speedtest-cli --json) and/or (speedtest --json) if that’s the python tool
-      d) HTTPS download test via curl (least “accurate” but hardest to block)
+      c) speedtest-cli   (speedtest-cli --json) and/or (speedtest --json) if that's the python tool
+      d) HTTPS download test via curl (least "accurate" but hardest to block)
    Ensures you always get a logged outcome (success or "blocked/unreachable").
 
 5) If any of (1)-(3) fail => broadcasts BLE advert with a 4-byte payload:
