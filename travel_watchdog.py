@@ -30,6 +30,8 @@ Phone:
 """
 
 import asyncio
+import importlib.util
+import sys
 import json
 import random
 import re
@@ -39,6 +41,21 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from typing import Optional, Tuple, Dict, Any, List
+
+if importlib.util.find_spec("dbus_next") is None:
+    log("Missing dependency: dbus-next. Attempting install via pip.")
+    install = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "dbus-next"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=120,
+    )
+    if install.returncode != 0:
+        raise SystemExit(
+            "Failed to install dbus-next. "
+            f"stdout: {install.stdout.strip()} stderr: {install.stderr.strip()}"
+        )
 
 from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method, dbus_property, PropertyAccess
