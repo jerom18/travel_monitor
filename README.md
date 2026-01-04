@@ -8,8 +8,7 @@ broadcasting a 4-byte manufacturer-data advert.
 ## Requirements
 
 - Raspberry Pi Zero 2 W (or similar) with BlueZ running.
-- Python 3 with `dbus-next` installed (the script will attempt
-  `python3 -m pip install dbus-next` if missing).
+- Python 3 with `dbus-next` installed.
 - Optional: `tailscale`, `librespeed-cli`, `speedtest`, `speedtest-cli`, `curl`
   for connectivity checks and speed tests.
 

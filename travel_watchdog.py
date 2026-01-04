@@ -83,10 +83,6 @@ MFG_COMPANY_ID = 0xFFFF
 PAYLOAD_VERSION = 1
 
 # Direct push (GATT write) config
-# Phone selection: set TARGET_DEVICE_NAME to the BLE name shown by your phone
-# or BLE scanner app (some platforms expose the "Bluetooth name"/alias).
-# Notifications: your phone app should subscribe to characteristic
-# notifications or do explicit reads of TARGET_CHAR_UUID to receive JSON updates.
 DIRECT_PUSH_ENABLED = True
 TARGET_DEVICE_NAME = "TravelWatchPhone"  # BLE device name to connect to
 TARGET_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
@@ -698,7 +694,7 @@ async def main() -> None:
                             direct_state.device_path = None
                             direct_state.char_path = None
 
-            # 4) Speedtest schedule (08:00-20:00, every 30 mins)
+            # 4) Speedtest schedule (08:00–20:00, every 30 mins)
             now = datetime.now()
             if in_speedtest_window(now) and (time.time() - last_speedtest) >= SPEEDTEST_INTERVAL_SEC:
                 res = run_speedtest_best_effort()
