@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 travel_watchdog.py  (Pi Zero 2 W)
 
@@ -6,7 +7,7 @@ What it does:
 1) LAN connectivity: finds default gateway dynamically and pings it
 2) WAN connectivity: pings google.com (change WAN_TARGET if you like)
 3) Tailscale connectivity: confirms tailscale backend running + self online; then (if any peer online) tailscale-pings one
-4) Speed test: every 30 mins between 08:00–20:00 (local time), tries tools in order "best"->"worst":
+4) Speed test: every 30 mins between 08:00-20:00 (local time), tries tools in order "best"->"worst":
       a) librespeed-cli  (JSON)
       b) Ookla speedtest (speedtest -f json) if available
       c) speedtest-cli   (speedtest-cli --json) and/or (speedtest --json) if that’s the python tool
@@ -23,6 +24,9 @@ Run:
   sudo python3 travel_watchdog.py
 Phone:
   Scan for BLE device name "TravelWatch" and inspect Manufacturer Data.
+  For direct push, set TARGET_DEVICE_NAME to your phone's BLE name as shown in
+  the scanning app or OS Bluetooth list. The phone app should subscribe to
+  notifications or read from the characteristic identified by TARGET_CHAR_UUID.
 """
 
 import asyncio
