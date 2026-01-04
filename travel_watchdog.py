@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 travel_watchdog.py  (Pi Zero 2 W)
 
@@ -6,21 +7,26 @@ What it does:
 1) LAN connectivity: finds default gateway dynamically and pings it
 2) WAN connectivity: pings google.com (change WAN_TARGET if you like)
 3) Tailscale connectivity: confirms tailscale backend running + self online; then (if any peer online) tailscale-pings one
-4) Speed test: every 30 mins between 08:00–20:00 (local time), tries tools in order "best"->"worst":
+4) Speed test: every 30 mins between 08:00-20:00 (local time), tries tools in order "best"->"worst":
       a) librespeed-cli  (JSON)
       b) Ookla speedtest (speedtest -f json) if available
-      c) speedtest-cli   (speedtest-cli --json) and/or (speedtest --json) if that’s the python tool
-      d) HTTPS download test via curl (least “accurate” but hardest to block)
+      c) speedtest-cli   (speedtest-cli --json) and/or (speedtest --json) if that's the python tool
+      d) HTTPS download test via curl (least "accurate" but hardest to block)
    Ensures you always get a logged outcome (success or "blocked/unreachable").
 
 5) If any of (1)-(3) fail => broadcasts BLE advert with a 4-byte payload:
       [version=1][bitmask][lan_rtt_ms or 255][wan_rtt_ms or 255]
    bitmask: bit0 LAN fail, bit1 WAN fail, bit2 TS fail
+6) Optionally scans for a BLE device by name, connects, and writes a larger JSON
+   payload over a configured GATT characteristic ("direct push" mode).
 
 Run:
   sudo python3 travel_watchdog.py
 Phone:
   Scan for BLE device name "TravelWatch" and inspect Manufacturer Data.
+  For direct push, set TARGET_DEVICE_NAME to your phone's BLE name as shown in
+  the scanning app or OS Bluetooth list. The phone app should subscribe to
+  notifications or read from the characteristic identified by TARGET_CHAR_UUID.
 """
 
 import asyncio
@@ -58,6 +64,19 @@ LOG_PATH = "/tmp/travel_watchdog.log"
 # BLE advert: manufacturer data company id 0xFFFF (test/unknown). Payload is 4 bytes.
 MFG_COMPANY_ID = 0xFFFF
 PAYLOAD_VERSION = 1
+
+# Direct push (GATT write) config
+# Phone selection: set TARGET_DEVICE_NAME to the BLE name shown by your phone
+# or BLE scanner app (some platforms expose the "Bluetooth name"/alias).
+# Notifications: your phone app should subscribe to characteristic
+# notifications or do explicit reads of TARGET_CHAR_UUID to receive JSON updates.
+DIRECT_PUSH_ENABLED = True
+TARGET_DEVICE_NAME = "TravelWatchPhone"  # BLE device name to connect to
+TARGET_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+TARGET_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+DIRECT_PUSH_SCAN_TIMEOUT_SEC = 15
+DIRECT_PUSH_RETRY_SEC = 30
+DIRECT_PUSH_MAX_CHUNK = 180  # bytes per GATT write (kept conservative)
 
 # HTTPS fallback for speed-ish test (harder to block than speedtest.net)
 HTTP_TEST_URL = "https://speed.hetzner.de/10MB.bin"
@@ -356,9 +375,7 @@ class Advertisement(ServiceInterface):
 
 
 async def find_adapter(bus: MessageBus) -> Optional[str]:
-    obj = await bus.introspect(BLUEZ_SERVICE, "/")
-    om = bus.get_proxy_object(BLUEZ_SERVICE, "/", obj).get_interface(DBUS_OM_IFACE)
-    managed = await om.call_get_managed_objects()
+    managed = await get_managed_objects(bus)
 
     for path, ifaces in managed.items():
         if "org.bluez.Adapter1" in ifaces and LE_ADVERTISING_MANAGER_IFACE in ifaces:
@@ -399,6 +416,182 @@ def in_speedtest_window(now: datetime) -> bool:
     return (t >= SPEEDTEST_WINDOW_START) and (t < SPEEDTEST_WINDOW_END)
 
 
+async def get_managed_objects(bus: MessageBus) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    obj = await bus.introspect(BLUEZ_SERVICE, "/")
+    om = bus.get_proxy_object(BLUEZ_SERVICE, "/", obj).get_interface(DBUS_OM_IFACE)
+    return await om.call_get_managed_objects()
+
+
+async def start_discovery(bus: MessageBus, adapter_path: str) -> None:
+    intro = await bus.introspect(BLUEZ_SERVICE, adapter_path)
+    proxy = bus.get_proxy_object(BLUEZ_SERVICE, adapter_path, intro)
+    adapter = proxy.get_interface("org.bluez.Adapter1")
+    await adapter.call_start_discovery()
+
+
+async def stop_discovery(bus: MessageBus, adapter_path: str) -> None:
+    intro = await bus.introspect(BLUEZ_SERVICE, adapter_path)
+    proxy = bus.get_proxy_object(BLUEZ_SERVICE, adapter_path, intro)
+    adapter = proxy.get_interface("org.bluez.Adapter1")
+    try:
+        await adapter.call_stop_discovery()
+    except Exception:
+        pass
+
+
+async def find_device_path_by_name(
+    bus: MessageBus,
+    adapter_path: str,
+    target_name: str,
+    timeout_sec: int,
+) -> Optional[str]:
+    await start_discovery(bus, adapter_path)
+    try:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            managed = await get_managed_objects(bus)
+            for path, ifaces in managed.items():
+                dev = ifaces.get("org.bluez.Device1")
+                if not dev:
+                    continue
+                if not path.startswith(adapter_path):
+                    continue
+                name = dev.get("Name") or dev.get("Alias")
+                if name == target_name:
+                    return path
+            await asyncio.sleep(1)
+        return None
+    finally:
+        await stop_discovery(bus, adapter_path)
+
+
+async def connect_device(bus: MessageBus, device_path: str) -> bool:
+    intro = await bus.introspect(BLUEZ_SERVICE, device_path)
+    proxy = bus.get_proxy_object(BLUEZ_SERVICE, device_path, intro)
+    device = proxy.get_interface("org.bluez.Device1")
+    try:
+        await device.call_connect()
+        return True
+    except Exception:
+        return False
+
+
+async def disconnect_device(bus: MessageBus, device_path: str) -> None:
+    intro = await bus.introspect(BLUEZ_SERVICE, device_path)
+    proxy = bus.get_proxy_object(BLUEZ_SERVICE, device_path, intro)
+    device = proxy.get_interface("org.bluez.Device1")
+    try:
+        await device.call_disconnect()
+    except Exception:
+        pass
+
+
+def find_characteristic_path(
+    managed: Dict[str, Dict[str, Dict[str, Any]]],
+    device_path: str,
+    char_uuid: str,
+    service_uuid: Optional[str] = None,
+) -> Optional[str]:
+    char_uuid = char_uuid.lower()
+    service_uuid = service_uuid.lower() if service_uuid else None
+    service_uuid_by_path: Dict[str, str] = {}
+
+    for path, ifaces in managed.items():
+        svc = ifaces.get("org.bluez.GattService1")
+        if not svc:
+            continue
+        uuid = str(svc.get("UUID", "")).lower()
+        service_uuid_by_path[path] = uuid
+
+    for path, ifaces in managed.items():
+        char = ifaces.get("org.bluez.GattCharacteristic1")
+        if not char:
+            continue
+        if not path.startswith(device_path):
+            continue
+        uuid = str(char.get("UUID", "")).lower()
+        if uuid != char_uuid:
+            continue
+        if service_uuid:
+            service_path = char.get("Service")
+            if not service_path:
+                continue
+            if service_uuid_by_path.get(service_path, "") != service_uuid:
+                continue
+        return path
+    return None
+
+
+def chunk_bytes(data: bytes, chunk_size: int) -> List[bytes]:
+    return [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+
+async def write_characteristic(bus: MessageBus, char_path: str, payload: bytes) -> bool:
+    intro = await bus.introspect(BLUEZ_SERVICE, char_path)
+    proxy = bus.get_proxy_object(BLUEZ_SERVICE, char_path, intro)
+    char = proxy.get_interface("org.bluez.GattCharacteristic1")
+    try:
+        for chunk in chunk_bytes(payload, DIRECT_PUSH_MAX_CHUNK):
+            await char.call_write_value(chunk, {})
+        return True
+    except Exception:
+        return False
+
+
+def build_direct_message(state: "NetState", speedtest: Optional[Dict[str, Any]]) -> bytes:
+    payload: Dict[str, Any] = {
+        "version": 1,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "lan": {"ok": state.lan_ok, "rtt_ms": state.lan_rtt},
+        "wan": {"ok": state.wan_ok, "rtt_ms": state.wan_rtt},
+        "tailscale": {"ok": state.ts_ok, "peer": state.ts_peer_used},
+    }
+    if speedtest:
+        payload["speedtest"] = speedtest
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+@dataclass
+class DirectPushState:
+    device_path: Optional[str] = None
+    char_path: Optional[str] = None
+    last_attempt: float = 0.0
+
+
+async def ensure_direct_push_ready(
+    bus: MessageBus,
+    adapter_path: str,
+    state: DirectPushState,
+) -> bool:
+    if state.device_path and state.char_path:
+        return True
+    if time.time() - state.last_attempt < DIRECT_PUSH_RETRY_SEC:
+        return False
+    state.last_attempt = time.time()
+
+    device_path = await find_device_path_by_name(
+        bus, adapter_path, TARGET_DEVICE_NAME, DIRECT_PUSH_SCAN_TIMEOUT_SEC
+    )
+    if not device_path:
+        log(f"Direct push: device '{TARGET_DEVICE_NAME}' not found")
+        return False
+    if not await connect_device(bus, device_path):
+        log(f"Direct push: failed to connect to {device_path}")
+        return False
+    managed = await get_managed_objects(bus)
+    char_path = find_characteristic_path(
+        managed, device_path, TARGET_CHAR_UUID, TARGET_SERVICE_UUID
+    )
+    if not char_path:
+        log("Direct push: target characteristic not found after connect")
+        await disconnect_device(bus, device_path)
+        return False
+    state.device_path = device_path
+    state.char_path = char_path
+    log(f"Direct push: connected to {device_path} char={char_path}")
+    return True
+
+
 @dataclass
 class NetState:
     lan_ok: bool
@@ -427,6 +620,9 @@ async def main() -> None:
 
     last_speedtest = 0.0
     last_bitmask: Optional[int] = None
+    last_direct_payload: Optional[bytes] = None
+    last_speedtest_result: Optional[Dict[str, Any]] = None
+    direct_state = DirectPushState()
 
     try:
         while True:
@@ -473,10 +669,23 @@ async def main() -> None:
                     f"bitmask={bitmask:03b}"
                 )
 
-            # 4) Speedtest schedule (08:00–20:00, every 30 mins)
+            if DIRECT_PUSH_ENABLED:
+                direct_payload = build_direct_message(state, last_speedtest_result)
+                if direct_payload != last_direct_payload:
+                    if await ensure_direct_push_ready(bus, adapter_path, direct_state):
+                        if await write_characteristic(bus, direct_state.char_path, direct_payload):
+                            last_direct_payload = direct_payload
+                            log(f"Direct push: sent {len(direct_payload)} bytes")
+                        else:
+                            log("Direct push: write failed, will retry")
+                            direct_state.device_path = None
+                            direct_state.char_path = None
+
+            # 4) Speedtest schedule (08:00-20:00, every 30 mins)
             now = datetime.now()
             if in_speedtest_window(now) and (time.time() - last_speedtest) >= SPEEDTEST_INTERVAL_SEC:
                 res = run_speedtest_best_effort()
+                last_speedtest_result = res
                 if res["ok"]:
                     dl = res.get("download_mbps")
                     ul = res.get("upload_mbps")
